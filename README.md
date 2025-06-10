@@ -1,14 +1,11 @@
 # Animal Binary Classifier - Applied ML
 
 **Authors:**  
-- Natalie Mladenova – s5161517 
-- Natalia Gayoso – s5221218   
-- Raul Ardelean – s5237688  
 - Mohammed Usman Sarki – s5528178
 
 ## 1. Overview
 We build a machine-learning pipeline to distinguish cats from dogs in images. Using a real-world 
-Kaggle dataset of 25 000 JPG/PNG images (12 500 cats, 12 500 dogs), we’ll clean, preprocess, train 
+Kaggle dataset of 25 000 JPG/PNG images (12 500 cats, 12 500 dogs), we'll clean, preprocess, train 
 both a Random Forest baseline and a fine-tuned ResNet CNN, and evaluate with a suite of metrics to measure performance and robustness.
 
 ## 2. Preprocessing 

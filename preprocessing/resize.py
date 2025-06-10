@@ -32,7 +32,8 @@ def resize_and_normalize(input_root, output_root, size=(224, 224)):
                     print(f"  ✗ Failed: {img_path.name} ({e})")
 
 if __name__ == "__main__":
-    project_root = Path.cwd()
+    # Use absolute path from project root
+    project_root = Path(__file__).resolve().parent.parent
     data_dir = project_root / "data" / "Processed"
     out_dir  = project_root / "data" / "ProcessedResizedNorm"
     if len(sys.argv) >= 3:

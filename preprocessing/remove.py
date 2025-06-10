@@ -2,7 +2,9 @@ import os
 from pathlib import Path
 from PIL import Image
 
-base_dir = Path(__file__).resolve().parent / 'data' / 'PetImages'
+# Use absolute path from project root
+project_root = Path(__file__).resolve().parent.parent
+base_dir = project_root / 'data' / 'PetImages'
 
 categories = ['Cat', 'Dog']
 corrupt_dir = base_dir / 'Corrupt'

@@ -1,83 +1,119 @@
 import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import IncrementalPCA
 import joblib
 from pathlib import Path
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import accuracy_score, f1_score
-from sklearn.decomposition import PCA
-from sklearn.pipeline import Pipeline
+import os
+from PIL import Image
+import io
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.model_selection import cross_val_score
 
-# Configuration
-SCRIPT_DIR     = Path(__file__).resolve().parent
-TRAIN_DIR      = SCRIPT_DIR / 'data' / 'ProcessedResizedNorm' / 'train'
-CATEGORIES     = ['Cats', 'Dogs']
-APPLY_PCA      = True
-PCA_COMPONENTS = 100      
-RF_TREES       = 30
-KFOLD_SPLITS   = 5
+def load_and_resize_image(file_path, target_size=(64, 64)):
+    """Load and resize an image to target size."""
+    arr = np.load(file_path)
+    img = Image.fromarray((arr * 255).astype(np.uint8))
+    img = img.resize(target_size, Image.Resampling.LANCZOS)
+    return np.array(img) / 255.0
 
-# Load file paths & labels
-filepaths, labels = [], []
-for idx, cls in enumerate(CATEGORIES):
-    folder = TRAIN_DIR / cls
-    if not folder.exists():
-        raise FileNotFoundError(f"Missing folder: {folder}")
-    for p in folder.glob('*.npy'):
-        filepaths.append(p)
-        labels.append(idx)
+def load_data(folder, batch_size=1000, target_size=(64, 64)):
+    """Load and preprocess data from a folder of .npy files in batches."""
+    data = []
+    files = [f for f in os.listdir(folder) if f.endswith('.npy')]
+    
+    for i in range(0, len(files), batch_size):
+        batch_files = files[i:i + batch_size]
+        batch_data = []
+        for file in batch_files:
+            arr = load_and_resize_image(os.path.join(folder, file), target_size)
+            batch_data.append(arr.flatten())
+        data.extend(batch_data)
+        print(f"Processed {min(i + batch_size, len(files))}/{len(files)} files")
+    
+    return np.array(data)
 
-print(f"Found {len(filepaths)} samples: {labels.count(0)} Cats, {labels.count(1)} Dogs")
+def main():
+    base_path = Path(__file__).resolve().parent
+    train_path = base_path / 'data' / 'ProcessedResizedNorm' / 'train'
+    models_path = base_path / 'models'
+    models_path.mkdir(exist_ok=True)
 
-# Build feature matrix
-X = np.stack([np.load(p).astype(np.float32).flatten() for p in filepaths])
-Y = np.array(labels, dtype=np.int64)
+    cat_folder = train_path / 'Cat'
+    dog_folder = train_path / 'Dog'
 
-# Cross‐validation
-skf = StratifiedKFold(n_splits=KFOLD_SPLITS, shuffle=True, random_state=42)
-accs, f1s = [], []
+    if not cat_folder.exists():
+        raise FileNotFoundError(f"Missing folder: {cat_folder}")
+    if not dog_folder.exists():
+        raise FileNotFoundError(f"Missing folder: {dog_folder}")
 
-for fold, (train_idx, val_idx) in enumerate(skf.split(X, Y), 1):
-    X_tr, X_va = X[train_idx], X[val_idx]
-    Y_tr, Y_va = Y[train_idx], Y[val_idx]
+    print("Loading training data...")
+    X_cat = load_data(cat_folder)
+    X_dog = load_data(dog_folder)
 
-    if APPLY_PCA:
-        pca = PCA(n_components=PCA_COMPONENTS).fit(X_tr)
-        X_tr = pca.transform(X_tr)
-        X_va = pca.transform(X_va)
+    y_cat = np.zeros(len(X_cat))
+    y_dog = np.ones(len(X_dog))
 
-    rf = RandomForestClassifier(
-        n_estimators=RF_TREES,
-        max_features='sqrt',
-        n_jobs=-1,
-        random_state=42
-    )
-    rf.fit(X_tr, Y_tr)
+    X = np.vstack([X_cat, X_dog])
+    y = np.concatenate([y_cat, y_dog])
 
-    preds = rf.predict(X_va)
-    acc   = accuracy_score(Y_va, preds)
-    f1    = f1_score(Y_va, preds)
-    print(f"Fold {fold}: Accuracy={acc:.3f}, F1={f1:.3f}")
-    accs.append(acc); f1s.append(f1)
+    n_features = X.shape[1]
+    n_components = min(n_features, 100)  
+    print(f"Original feature dimension: {n_features}")
+    print(f"Using {n_components} PCA components")
 
-print(f"Overall: Accuracy={np.mean(accs):.3f}±{np.std(accs):.3f}, "
-      f"F1={np.mean(f1s):.3f}±{np.std(f1s):.3f}")
+    print("Training Random Forest model...")
+    pipeline = Pipeline([
+        ('scaler', StandardScaler()),
+        ('pca', IncrementalPCA(n_components=n_components, batch_size=1000)),
+        ('classifier', RandomForestClassifier(
+            n_estimators=100,
+            max_depth=None,
+            min_samples_split=2,
+            min_samples_leaf=1,
+            max_features='sqrt',
+            n_jobs=-1,
+            random_state=42,
+            verbose=1
+        ))
+    ])
 
-# Retrain on full data and save the pipeline
-pipeline = Pipeline([
-    ('pca', PCA(n_components=PCA_COMPONENTS)),
-    ('rf', RandomForestClassifier(
-        n_estimators=RF_TREES,
-        max_features='sqrt',
-        n_jobs=-1,
-        random_state=42
-    ))
-])
-pipeline.fit(X, Y)
+    pipeline.fit(X, y)
 
-model_dir = SCRIPT_DIR / 'models'
-model_dir.mkdir(exist_ok=True)
-out_path = model_dir / 'rf_pipeline.joblib'
-joblib.dump(pipeline, out_path)
-print(f"Saved trained pipeline to {out_path}")
+    pca = pipeline.named_steps['pca']
+    explained_variance = np.sum(pca.explained_variance_ratio_)
+    print(f"Total explained variance: {explained_variance:.2%}")
+
+    # Evaluate model performance
+    y_pred = pipeline.predict(X)
+    accuracy = accuracy_score(y, y_pred)
+    print(f"Accuracy: {accuracy:.2%}")
+    print("Classification Report:")
+    print(classification_report(y, y_pred))
+    print("Confusion Matrix:")
+    print(confusion_matrix(y, y_pred))
+
+    # Check for over/underfitting
+    cv_scores = cross_val_score(pipeline, X, y, cv=5)
+    print(f"Cross-validation scores: {cv_scores}")
+    print(f"Mean CV score: {cv_scores.mean():.2%}")
+
+    # Compare to baseline
+    baseline_accuracy = 0.5  # Assuming a simple baseline
+    print(f"Baseline accuracy: {baseline_accuracy:.2%}")
+    print(f"Improvement over baseline: {accuracy - baseline_accuracy:.2%}")
+
+    # Measure of variance
+    pca = pipeline.named_steps['pca']
+    explained_variance = np.sum(pca.explained_variance_ratio_)
+    print(f"Total explained variance for Random Forest: {explained_variance:.2%}")
+
+    output_path = models_path / 'rf_pipeline.joblib'
+    joblib.dump(pipeline, output_path)
+    print(f"Model saved to {output_path}")
+
+if __name__ == "__main__":
+    main()
 
 

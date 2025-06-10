@@ -2,8 +2,8 @@ import shutil
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 
-
-PROJECT_ROOT = Path.cwd()                 
+# Use absolute path from project root
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BASE_DIR     = PROJECT_ROOT / 'data' / 'PetImages'
 OUTPUT_DIR   = PROJECT_ROOT / 'data' / 'Processed'
 CATEGORIES   = ['Cat', 'Dog']
