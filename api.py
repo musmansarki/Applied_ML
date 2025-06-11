@@ -165,12 +165,30 @@ async def startup_event():
 
 def preprocess_image_rf(image: Image.Image) -> np.ndarray:
     """Preprocess image for Random Forest model"""
-    # Resize image
-    image = image.resize((64, 64))
-    # Convert to numpy array and normalize
-    img_array = np.array(image) / 255.0
-    # Flatten the image
-    return img_array.reshape(1, -1)
+    try:
+        # Convert to RGB if not already
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+            
+        # Resize image to match training size
+        image = image.resize((64, 64), Image.Resampling.LANCZOS)
+        
+        # Convert to numpy array
+        img_array = np.array(image, dtype=np.float32)
+        
+        # Ensure correct shape (64, 64, 3)
+        if len(img_array.shape) == 2:  # If grayscale
+            img_array = np.stack([img_array] * 3, axis=-1)
+        elif len(img_array.shape) == 3 and img_array.shape[2] != 3:  # If not RGB
+            img_array = img_array[:, :, :3]  # Take first 3 channels
+            
+        # Normalize to [0, 1]
+        img_array = img_array / 255.0
+        
+        # Flatten the image
+        return img_array.reshape(1, -1)
+    except Exception as e:
+        raise ValueError(f"Error in preprocessing: {str(e)}")
 
 def preprocess_image_cnn(image: Image.Image) -> torch.Tensor:
     """Preprocess image for CNN model"""
@@ -187,42 +205,58 @@ def visualize_rf_prediction(image, importances):
     if isinstance(image, Image.Image):
         image = np.array(image)
     
-    # Reshape importances to match PCA components (10x10 grid)
-    importance_map = importances.reshape(10, 10)
+    print(f"Original image shape: {image.shape}")  # Debug print
+    print(f"Importances shape: {importances.shape}")  # Debug print
     
-    # Resize importance map to match original image size
-    importance_map = cv2.resize(importance_map, (image.shape[1], image.shape[0]))
-    
-    # Normalize importance map to [0, 1]
-    importance_map = (importance_map - importance_map.min()) / (importance_map.max() - importance_map.min())
-    
-    # Convert to heatmap
-    heatmap = cv2.applyColorMap(np.uint8(255 * importance_map), cv2.COLORMAP_JET)
-    
-    # Convert image to BGR for OpenCV
-    if len(image.shape) == 3 and image.shape[2] == 3:
-        image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    else:
-        image_bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    
-    # Blend heatmap with original image
-    output = cv2.addWeighted(image_bgr, 0.6, heatmap, 0.4, 0)
-    
-    # Convert back to RGB
-    output_rgb = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)
-    
-    # Convert to PIL Image
-    output_image = Image.fromarray(output_rgb)
-    
-    # Save to bytes
-    buf = io.BytesIO()
-    output_image.save(buf, format='PNG')
-    buf.seek(0)
-    
-    return buf.getvalue()
+    try:
+        # Ensure importances are in the correct shape
+        if len(importances.shape) == 1:
+            # Reshape to match the flattened image dimensions (64x64x3)
+            importance_map = importances.reshape(64, 64, 3)
+        else:
+            importance_map = importances
+            
+        # Take mean across color channels to get a single importance value per pixel
+        importance_map = np.mean(importance_map, axis=2)
+        print(f"Reshaped importance map shape: {importance_map.shape}")  # Debug print
+        
+        # Resize importance map to match original image size
+        importance_map = cv2.resize(importance_map, (image.shape[1], image.shape[0]))
+        print(f"After resize shape: {importance_map.shape}")  # Debug print
+        
+        # Normalize importance map to [0, 1]
+        importance_map = (importance_map - importance_map.min()) / (importance_map.max() - importance_map.min() + 1e-8)
+        
+        # Convert to heatmap
+        heatmap = cv2.applyColorMap(np.uint8(255 * importance_map), cv2.COLORMAP_JET)
+        
+        # Convert image to BGR for OpenCV
+        if len(image.shape) == 3 and image.shape[2] == 3:
+            image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        else:
+            image_bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        
+        # Blend heatmap with original image
+        output = cv2.addWeighted(image_bgr, 0.6, heatmap, 0.4, 0)
+        
+        # Convert back to RGB
+        output_rgb = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)
+        
+        # Convert to PIL Image
+        output_image = Image.fromarray(output_rgb)
+        
+        # Save to bytes
+        buf = io.BytesIO()
+        output_image.save(buf, format='PNG')
+        buf.seek(0)
+        
+        return buf.getvalue()
+    except Exception as e:
+        print(f"Error in visualization: {str(e)}")  # Debug print
+        raise ValueError(f"Error in visualization: {str(e)}")
 
 def visualize_cnn_prediction(img, probabilities):
-    """Create visualization for CNN prediction using GradCAM"""
+    """Create visualization for CNN prediction using GradCAM and include variance measure"""
     # Convert numpy array to PIL Image if needed
     if isinstance(img, np.ndarray):
         img = Image.fromarray(img)
@@ -255,7 +289,7 @@ def visualize_cnn_prediction(img, probabilities):
     # Blend heatmap with original image
     output = cv2.addWeighted(image_cv, 0.6, heatmap, 0.4, 0)
     
-    # Convert back to PIL Image
+    # Convert back to PIL
     output_image = Image.fromarray(cv2.cvtColor(output, cv2.COLOR_BGR2RGB))
     
     # Save to bytes
@@ -307,13 +341,16 @@ async def predict(
             # Get prediction
             prediction = models_loaded['rf'].predict(features)[0]
             probabilities = models_loaded['rf'].predict_proba(features)[0]
-            confidence = float(probabilities[1] if prediction == 1 else probabilities[0])
+            # For RF: 0 is Cat, 1 is Dog
+            confidence = float(probabilities[prediction])
+            variance = float(np.var(probabilities))
             
             # Create visualization if requested
             visualization = None
             if include_visualization:
                 # Get feature importances from the classifier step
                 importances = models_loaded['rf'].named_steps['classifier'].feature_importances_
+                print(f"Feature importances shape: {importances.shape}")  # Debug print
                 # Create visualization
                 visualization = visualize_rf_prediction(img_rgb, importances)
                 
@@ -330,33 +367,36 @@ async def predict(
                 probabilities = torch.softmax(outputs, dim=1)[0]
                 prediction = torch.argmax(probabilities).item()
                 confidence = float(probabilities[prediction])
+                variance = float(torch.var(probabilities).item())
             
-            # Create visualization if requested
             visualization = None
             if include_visualization:
                 visualization = visualize_cnn_prediction(img_rgb, probabilities.numpy())
         
-        metrics = {
-            "confidence": confidence,
-            "prediction_time": 0.0  # Add timing if needed
+        # Set response headers
+        headers = {
+            "X-Prediction-Label": "Cat" if prediction == 0 else "Dog",
+            "X-Prediction-Confidence": f"{confidence:.4f}",
+            "X-Prediction-Variance": f"{variance:.4f}"
+        }
+        
+        # Create response
+        response = {
+            "label": "Cat" if prediction == 0 else "Dog",
+            "probability": confidence,
+            "variance": variance
         }
         
         if include_visualization and visualization:
             return Response(
                 content=visualization,
                 media_type="image/png",
-                headers={
-                    "X-Prediction-Label": "Cat" if prediction == 1 else "Dog",
-                    "X-Prediction-Confidence": str(confidence)
-                }
+                headers=headers
             )
         else:
-            return JSONResponse({
-                "label": "Cat" if prediction == 1 else "Dog",
-                "probability": confidence,
-                "metrics": metrics
-            })
+            return JSONResponse(response)
         
     except Exception as e:
+        print(f"Error details: {str(e)}")  # Debug print
         raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
 
