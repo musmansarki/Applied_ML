@@ -19,6 +19,7 @@ import seaborn as sns
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import cv2
 from gradcam import GradCAM
+import traceback
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -125,7 +126,7 @@ def load_models():
     """Load both models at startup"""
     models = {}
     try:
-        # Load Random Forest model
+        
         rf_path = os.path.join('models', 'rf_pipeline.joblib')
         if os.path.exists(rf_path):
             models['rf'] = joblib.load(rf_path)
@@ -133,7 +134,7 @@ def load_models():
         else:
             print("✗ Random Forest model file not found")
             
-        # Load CNN model
+        
         cnn_path = os.path.join('models', 'best_cnn_model.pth')
         if os.path.exists(cnn_path):
             cnn_model = ResNet()
@@ -198,62 +199,6 @@ def preprocess_image_cnn(image: Image.Image) -> torch.Tensor:
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     return transform(image).unsqueeze(0)
-
-def visualize_rf_prediction(image, importances):
-    """Create visualization for Random Forest prediction using GradCAM-like approach."""
-    # Convert image to numpy array if it's not already
-    if isinstance(image, Image.Image):
-        image = np.array(image)
-    
-    print(f"Original image shape: {image.shape}")  # Debug print
-    print(f"Importances shape: {importances.shape}")  # Debug print
-    
-    try:
-        # Ensure importances are in the correct shape
-        if len(importances.shape) == 1:
-            # Reshape to match the flattened image dimensions (64x64x3)
-            importance_map = importances.reshape(64, 64, 3)
-        else:
-            importance_map = importances
-            
-        # Take mean across color channels to get a single importance value per pixel
-        importance_map = np.mean(importance_map, axis=2)
-        print(f"Reshaped importance map shape: {importance_map.shape}")  # Debug print
-        
-        # Resize importance map to match original image size
-        importance_map = cv2.resize(importance_map, (image.shape[1], image.shape[0]))
-        print(f"After resize shape: {importance_map.shape}")  # Debug print
-        
-        # Normalize importance map to [0, 1]
-        importance_map = (importance_map - importance_map.min()) / (importance_map.max() - importance_map.min() + 1e-8)
-        
-        # Convert to heatmap
-        heatmap = cv2.applyColorMap(np.uint8(255 * importance_map), cv2.COLORMAP_JET)
-        
-        # Convert image to BGR for OpenCV
-        if len(image.shape) == 3 and image.shape[2] == 3:
-            image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        else:
-            image_bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        
-        # Blend heatmap with original image
-        output = cv2.addWeighted(image_bgr, 0.6, heatmap, 0.4, 0)
-        
-        # Convert back to RGB
-        output_rgb = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)
-        
-        # Convert to PIL Image
-        output_image = Image.fromarray(output_rgb)
-        
-        # Save to bytes
-        buf = io.BytesIO()
-        output_image.save(buf, format='PNG')
-        buf.seek(0)
-        
-        return buf.getvalue()
-    except Exception as e:
-        print(f"Error in visualization: {str(e)}")  # Debug print
-        raise ValueError(f"Error in visualization: {str(e)}")
 
 def visualize_cnn_prediction(img, probabilities):
     """Create visualization for CNN prediction using GradCAM and include variance measure"""
@@ -338,22 +283,71 @@ async def predict(
             img_pil = Image.fromarray(img_rgb)
             # Preprocess image
             features = preprocess_image_rf(img_pil)
-            # Get prediction
-            prediction = models_loaded['rf'].predict(features)[0]
-            probabilities = models_loaded['rf'].predict_proba(features)[0]
-            # For RF: 0 is Cat, 1 is Dog
-            confidence = float(probabilities[prediction])
-            variance = float(np.var(probabilities))
+            print(f"[DEBUG] RF features shape: {features.shape}, dtype: {features.dtype}")
+            import traceback
+            try:
+                print("[DEBUG] About to call RF predict...")
+                prediction = models_loaded['rf'].predict(features)[0]
+                print(f"[DEBUG] RF predict successful: {prediction}")
+                print("[DEBUG] About to call RF predict_proba...")
+                probabilities = models_loaded['rf'].predict_proba(features)[0]
+                print(f"[DEBUG] RF predict_proba successful: {probabilities}")
+            except Exception as e:
+                tb = traceback.format_exc()
+                print(f"[ERROR] RF prediction failed with traceback:")
+                print(tb)
+                raise HTTPException(status_code=400, detail=f"RF prediction failed: {str(e)}\n\nTraceback:\n{tb}")
             
-            # Create visualization if requested
-            visualization = None
+            # For RF: 0 is Cat, 1 is Dog
+            predicted_class = "Cat" if prediction == 0 else "Dog"
+            confidence = max(probabilities)
+            
+            response_data = {
+                "predicted_class": predicted_class,
+                "confidence": float(confidence),
+                "probabilities": {
+                    "Cat": float(probabilities[0]),
+                    "Dog": float(probabilities[1])
+                }
+            }
+            
             if include_visualization:
-                # Get feature importances from the classifier step
-                importances = models_loaded['rf'].named_steps['classifier'].feature_importances_
-                print(f"Feature importances shape: {importances.shape}")  # Debug print
-                # Create visualization
-                visualization = visualize_rf_prediction(img_rgb, importances)
-                
+                try:
+                    print("[DEBUG] Creating RF visualization...")
+                    # Get feature importances from the Random Forest classifier
+                    importances = models_loaded['rf'].named_steps['classifier'].feature_importances_
+                    print(f"[DEBUG] Importances shape: {importances.shape}")
+                    
+                    # Create a bar plot of the top PCA component importances
+                    plt.figure(figsize=(10, 6))
+                    top_n = min(20, len(importances))  # Show top 20 components
+                    top_indices = np.argsort(importances)[-top_n:]
+                    top_importances = importances[top_indices]
+                    
+                    plt.barh(range(top_n), top_importances)
+                    plt.yticks(range(top_n), [f'PC{i+1}' for i in top_indices])
+                    plt.xlabel('Feature Importance')
+                    plt.title(f'Top {top_n} PCA Component Importances (Random Forest)')
+                    plt.gca().invert_yaxis()
+                    
+                    # Save the plot
+                    img_buffer = io.BytesIO()
+                    plt.savefig(img_buffer, format='png', bbox_inches='tight', dpi=150)
+                    img_buffer.seek(0)
+                    plt.close()
+                    
+                    # Convert to base64
+                    img_base64 = base64.b64encode(img_buffer.getvalue()).decode()
+                    
+                    response_data["visualization"] = f"data:image/png;base64,{img_base64}"
+                    print("[DEBUG] RF visualization created successfully")
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    print(f"[ERROR] RF visualization failed: {str(e)}")
+                    print(tb)
+                    response_data["visualization_error"] = f"Failed to create visualization: {str(e)}"
+            
+            return response_data
         else:  # CNN
             # Convert BGR to RGB
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)

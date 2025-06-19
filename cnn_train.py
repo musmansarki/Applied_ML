@@ -92,37 +92,48 @@ def evaluate(model, loader, criterion, device):
 
 def main():
     data_root = Path("data/ProcessedResizedNorm")
-    batch_size = 32
     num_epochs = 10
-    lr = 1e-4
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    train_ds = NPYImageDataset(data_root / "train", augment=True)
-    val_ds = NPYImageDataset(data_root / "val", augment=False)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2)
-
-    # Model: ResNet18
-    model = models.resnet18(weights="IMAGENET1K_V1")
-    model.fc = nn.Linear(model.fc.in_features, 2)  # 2 classes
-    model = model.to(device)
-
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-
+    # Hyperparameter grid
+    learning_rates = [1e-3, 1e-4]
+    batch_sizes = [16, 32]
     best_acc = 0.0
-    for epoch in range(num_epochs):
-        print(f"Epoch {epoch+1}/{num_epochs}")
-        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss, val_acc = evaluate(model, val_loader, criterion, device)
-        print(f"  Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f}")
-        print(f"  Val   Loss: {val_loss:.4f}, Acc: {val_acc:.4f}")
-        if val_acc > best_acc:
-            best_acc = val_acc
-            torch.save(model.state_dict(), "best_cnn_model.pth")
-            print("  ✓ Saved new best model!")
+    best_params = None
 
-    print(f"Best validation accuracy: {best_acc:.4f}")
+    for lr in learning_rates:
+        for batch_size in batch_sizes:
+            print(f"\n=== Training with lr={lr}, batch_size={batch_size} ===")
+            train_ds = NPYImageDataset(data_root / "train", augment=True)
+            val_ds = NPYImageDataset(data_root / "val", augment=False)
+            train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=2)
+            val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2)
+
+            # Model: ResNet18
+            model = models.resnet18(weights="IMAGENET1K_V1")
+            model.fc = nn.Linear(model.fc.in_features, 2)  # 2 classes
+            model = model.to(device)
+
+            criterion = nn.CrossEntropyLoss()
+            optimizer = optim.Adam(model.parameters(), lr=lr)
+
+            best_val_acc = 0.0
+            for epoch in range(num_epochs):
+                print(f"Epoch {epoch+1}/{num_epochs}")
+                train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
+                val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+                print(f"  Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f}")
+                print(f"  Val   Loss: {val_loss:.4f}, Acc: {val_acc:.4f}")
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    # Save best model for this run
+                    torch.save(model.state_dict(), f"best_cnn_model_lr{lr}_bs{batch_size}.pth")
+            print(f"Best val acc for lr={lr}, batch_size={batch_size}: {best_val_acc:.4f}")
+            if best_val_acc > best_acc:
+                best_acc = best_val_acc
+                best_params = {'learning_rate': lr, 'batch_size': batch_size}
+
+    print(f"\nBest hyperparameters: {best_params}, Best validation accuracy: {best_acc:.4f}")
 
     # Optionally, evaluate on test set
     test_dir = data_root / "test"
