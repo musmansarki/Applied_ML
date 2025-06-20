@@ -39,7 +39,42 @@ both a Random Forest baseline and a fine-tuned ResNet CNN, and evaluate with a s
   | **Mean ± Std** | **0.611 ± 0.003** | **0.605 ± 0.005** |  
 - **Baseline Insight:** ≈61 % accuracy, consistent across folds; serves as a reference.
 
-## 7. Proposed CNN Model
+## 4. Proposed CNN Model (CNN Training Pipeline)
+- **Preprocessing:**
+  - Uses 224×224 RGB .npy arrays normalized to [0,1] (prepared via resize.py
+  - Applies on-the-fly data augmentation during training
+  - Random horizontal flip, rotation, resized crop, color jitter, and Gaussian noise
+- **Architecture:**
+  - Pretrained ResNet18, fine-tuned for binary classification (2 output classes)
+  - Final layer replaced with nn.Linear(..., 2)
+  - Trained with CrossEntropyLoss and Adam optimizer
+- **Regularization:**
+  - L2 weight decay
+  - Data augmentation
+- **Evaluation:**
+  - Reported accuracy and F1-score on validation and (optional) test set
+  - GradCAM used to visualize spatial attention of the CNN on input images
+- **Output:**
+  - Best model saved as models/best_cnn_model.pth
+
+## API
+- **Start server using uvicorn**
+  - uvicorn main:app --reload
+- **Open the interactive Swagger UI**
+  - http://127.0.0.1:8000/docs
+- **Usage**
+  - Endpoint: POST / predict
+  - Query parameters
+    - model_type: "rf" (Random Forest) or "cnn" (Convolutional Neural Network)
+    - include_visualization: true or false (default: true)
+  - File input: Upload a JPG or PNG image
+- **Responses**
+  - label: Predicted class; "Cat" or "Dog"
+  - probability: Model confidence (float)
+  - variance: Uncertainty in prediction
+  - visualization: Optional heatmap image (if enabled)
+
+## Dataset can be found at: https://www.kaggle.com/datasets/shaunthesheep/microsoft-catsvsdogs-dataset?select=PetImages
 
 ## Installation
 Install the required packages: 
