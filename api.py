@@ -16,7 +16,7 @@ from typing import Optional, Dict, Any, List
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
 import seaborn as sns
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, precision_score, recall_score, f1_score
 import cv2
 from gradcam import GradCAM
 import traceback
@@ -301,10 +301,12 @@ async def predict(
             # For RF: 0 is Cat, 1 is Dog
             predicted_class = "Cat" if prediction == 0 else "Dog"
             confidence = max(probabilities)
+            variance = float(np.var(probabilities))  # Calculate variance from probabilities
             
             response_data = {
                 "predicted_class": predicted_class,
                 "confidence": float(confidence),
+                "variance": variance,  # Add variance to response
                 "probabilities": {
                     "Cat": float(probabilities[0]),
                     "Dog": float(probabilities[1])
@@ -363,34 +365,151 @@ async def predict(
                 confidence = float(probabilities[prediction])
                 variance = float(torch.var(probabilities).item())
             
-            visualization = None
+            # For CNN: 0 is Cat, 1 is Dog
+            predicted_class = "Cat" if prediction == 0 else "Dog"
+            
+            response_data = {
+                "predicted_class": predicted_class,
+                "confidence": confidence,
+                "variance": variance,
+                "probabilities": {
+                    "Cat": float(probabilities[0]),
+                    "Dog": float(probabilities[1])
+                }
+            }
+            
             if include_visualization:
-                visualization = visualize_cnn_prediction(img_rgb, probabilities.numpy())
-        
-        # Set response headers
-        headers = {
-            "X-Prediction-Label": "Cat" if prediction == 0 else "Dog",
-            "X-Prediction-Confidence": f"{confidence:.4f}",
-            "X-Prediction-Variance": f"{variance:.4f}"
-        }
-        
-        # Create response
-        response = {
-            "label": "Cat" if prediction == 0 else "Dog",
-            "probability": confidence,
-            "variance": variance
-        }
-        
-        if include_visualization and visualization:
-            return Response(
-                content=visualization,
-                media_type="image/png",
-                headers=headers
-            )
-        else:
-            return JSONResponse(response)
+                try:
+                    # Create the GradCAM visualization
+                    visualization_bytes = visualize_cnn_prediction(img_rgb, probabilities.numpy())
+                    
+                    # Return the visualization as an image with prediction metadata in headers
+                    return Response(
+                        content=visualization_bytes,
+                        media_type="image/png",
+                        headers={
+                            "Content-Disposition": f"inline; filename=gradcam_visualization.png",
+                            "X-Predicted-Class": predicted_class,
+                            "X-Confidence": str(confidence),
+                            "X-Variance": str(variance),
+                            "X-Probabilities": f"Cat:{probabilities[0]:.4f},Dog:{probabilities[1]:.4f}"
+                        }
+                    )
+                except Exception as e:
+                    response_data["visualization_error"] = f"Failed to create visualization: {str(e)}"
+                    return response_data
+            
+            return response_data
         
     except Exception as e:
         print(f"Error details: {str(e)}")  # Debug print
         raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
+
+@app.get("/evaluate")
+async def evaluate_models():
+    """Evaluate both models on test data and return metrics including variance"""
+    try:
+        # Load test data
+        test_data = np.load('test_data.npy')
+        test_labels = np.load('test_labels.npy')
+        
+        results = {}
+        
+        # Evaluate Random Forest
+        if 'rf' in models_loaded:
+            try:
+                # Get predictions and probabilities
+                rf_predictions = models_loaded['rf'].predict(test_data)
+                rf_probabilities = models_loaded['rf'].predict_proba(test_data)
+                
+                # Calculate basic metrics
+                rf_accuracy = accuracy_score(test_labels, rf_predictions)
+                rf_precision = precision_score(test_labels, rf_predictions, average='weighted')
+                rf_recall = recall_score(test_labels, rf_predictions, average='weighted')
+                rf_f1 = f1_score(test_labels, rf_predictions, average='weighted')
+                
+                # Calculate variance metrics
+                rf_variances = np.var(rf_probabilities, axis=1)
+                rf_mean_variance = float(np.mean(rf_variances))
+                rf_std_variance = float(np.std(rf_variances))
+                rf_confidence_scores = np.max(rf_probabilities, axis=1)
+                rf_mean_confidence = float(np.mean(rf_confidence_scores))
+                
+                results['random_forest'] = {
+                    'accuracy': rf_accuracy,
+                    'precision': rf_precision,
+                    'recall': rf_recall,
+                    'f1_score': rf_f1,
+                    'mean_variance': rf_mean_variance,
+                    'std_variance': rf_std_variance,
+                    'mean_confidence': rf_mean_confidence,
+                    'variance_distribution': {
+                        'min': float(np.min(rf_variances)),
+                        'max': float(np.max(rf_variances)),
+                        'median': float(np.median(rf_variances))
+                    }
+                }
+            except Exception as e:
+                results['random_forest'] = {'error': str(e)}
+        
+        # Evaluate CNN
+        if 'cnn' in models_loaded:
+            try:
+                # Convert test data to tensor format
+                test_tensor = torch.FloatTensor(test_data)
+                
+                # Get predictions
+                cnn_predictions = []
+                cnn_probabilities = []
+                cnn_variances = []
+                
+                with torch.no_grad():
+                    for i in range(0, len(test_tensor), 32):  # Process in batches
+                        batch = test_tensor[i:i+32]
+                        outputs = models_loaded['cnn'](batch)
+                        probs = torch.softmax(outputs, dim=1)
+                        preds = torch.argmax(probs, dim=1)
+                        vars = torch.var(probs, dim=1)
+                        
+                        cnn_probabilities.extend(probs.numpy())
+                        cnn_predictions.extend(preds.numpy())
+                        cnn_variances.extend(vars.numpy())
+                
+                cnn_predictions = np.array(cnn_predictions)
+                cnn_probabilities = np.array(cnn_probabilities)
+                cnn_variances = np.array(cnn_variances)
+                
+                # Calculate basic metrics
+                cnn_accuracy = accuracy_score(test_labels, cnn_predictions)
+                cnn_precision = precision_score(test_labels, cnn_predictions, average='weighted')
+                cnn_recall = recall_score(test_labels, cnn_predictions, average='weighted')
+                cnn_f1 = f1_score(test_labels, cnn_predictions, average='weighted')
+                
+                # Calculate variance metrics
+                cnn_mean_variance = float(np.mean(cnn_variances))
+                cnn_std_variance = float(np.std(cnn_variances))
+                cnn_confidence_scores = np.max(cnn_probabilities, axis=1)
+                cnn_mean_confidence = float(np.mean(cnn_confidence_scores))
+                
+                results['cnn'] = {
+                    'accuracy': cnn_accuracy,
+                    'precision': cnn_precision,
+                    'recall': cnn_recall,
+                    'f1_score': cnn_f1,
+                    'mean_variance': cnn_mean_variance,
+                    'std_variance': cnn_std_variance,
+                    'mean_confidence': cnn_mean_confidence,
+                    'variance_distribution': {
+                        'min': float(np.min(cnn_variances)),
+                        'max': float(np.max(cnn_variances)),
+                        'median': float(np.median(cnn_variances))
+                    }
+                }
+            except Exception as e:
+                results['cnn'] = {'error': str(e)}
+        
+        return results
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Evaluation failed: {str(e)}")
 
