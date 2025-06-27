@@ -163,11 +163,5 @@ def main():
     print(f"Baseline accuracy: {baseline_accuracy:.2%}")
     print(f"Improvement over baseline: {accuracy - baseline_accuracy:.2%}")
 
-    # Measure of variance
-    # Assuming PCA is applied to the CNN model, add the following lines
-    # pca = pipeline.named_steps['pca']
-    # explained_variance = np.sum(pca.explained_variance_ratio_)
-    # print(f"Total explained variance for CNN: {explained_variance:.2%}")
-
 if __name__ == "__main__":
     main() 
